@@ -1,0 +1,309 @@
+from machine import Pin
+import time, os, sdcard, sys, uos
+
+
+# SPI configuration for SPI0
+spi = machine.SPI(0,
+                  baudrate=1_000_000,
+                  polarity=0,
+                  phase=0,
+                  bits=8,
+                  firstbit=machine.SPI.MSB,
+                  sck=machine.Pin(18),
+                  mosi=machine.Pin(19),
+                  miso=machine.Pin(16))
+
+cs = machine.Pin(17, machine.Pin.OUT)
+
+try:
+ sd = sdcard.SDCard(spi, cs)
+ vfs = uos.VfsFat(sd)
+ uos.mount(vfs, "/sd")
+ print("SD card mounted.")
+ SDCARD = True
+except Exception as e:
+ print("Failed to mount SD card:", e)
+ SDCARD = False
+ sys.exit()
+root@node05 (rw) /var/www/html/firmware/master # cat app.py_sender
+import utime, time, ubinascii, machine, network, ntptime
+from machine import RTC, WDT
+from simple import MQTTClient
+print ("Running external script")
+
+WD = False
+
+# WatchDog
+if (WD == True):
+ wdt=WDT(timeout=8388)
+
+# CONFIG
+WIFI_SSID = "rpi_network"
+MQTT_SERVER = "192.168.10.1"
+MQTT_TOPIC = b"pico/data"
+MQTT_PORT = 1883
+DEVICE = ubinascii.hexlify(machine.unique_id()).decode()
+led = machine.Pin("LED", machine.Pin.OUT)
+
+sim_pwr_pin = 14
+uart_gsm_port = 0
+uart_gsm_baud = 115200
+gsm = machine.UART(uart_gsm_port, uart_gsm_baud)
+TIMEOUT = 1000
+
+##################### HELPER FUNCTIONS ##############################
+
+def blink():
+    led.value(1); time.sleep(.1)
+    if (WD == True):
+     wdt.feed()
+    led.value(0); time.sleep(.2)
+
+def power_on_off():
+    pwr = machine.Pin(sim_pwr_pin, machine.Pin.OUT)
+    pwr.value(0); utime.sleep(5)
+    blink()
+    pwr.value(1); utime.sleep(5)
+    blink()
+
+def wait_resp_info(timeout=TIMEOUT):
+    blink()
+    start = utime.ticks_ms()
+    buff = b""
+    while (utime.ticks_ms() - start) < timeout:
+        if gsm.any():
+            buff += gsm.read(1)
+    return buff
+
+def send_at(cmd, expected, timeout=TIMEOUT):
+    blink()
+    gsm.write((cmd+"\r\n").encode())
+    start = utime.ticks_ms()
+    buff = b""
+    while (utime.ticks_ms() - start) < timeout:
+        if gsm.any():
+            buff += gsm.read(1)
+    if buff:
+        out = buff.decode()
+        if expected in out:
+            return True
+    return False
+
+##################### BTS PARSING ##################################
+
+def get_bts_info():
+    send_at("AT+CENG=4,0", "OK")
+    gsm.write(b"AT+CENG?\r\n")
+    raw = wait_resp_info()
+    text = str(raw)
+    parts = text.split(",")
+
+    if len(parts) < 10:
+        return None
+
+    try:
+        if (parts[0] != "b''"):
+            if (parts[0] == "b'AT+CENG?\\r\\r\\n+CENG: 4"):
+                print('Part 1')
+                MCC = parts[5]
+                MNC = parts[6]
+                BSIC = parts[7]
+                CELLIDhex=parts[8]
+                CELLIDdec = int(CELLIDhex, 16)
+                CELLID=str(CELLIDdec)
+                LAChex=parts[9]
+                LACdec = int(LAChex, 16)
+                LAC=str(LACdec)
+                return {"MCC":MCC,"MNC":MNC,"BSIC":BSIC,"CELLID":CELLID,"LAC":LAC}
+    except:
+        return None
+
+##################### GPS PARSING ##################################
+
+def parse_gpgga(line):
+    if line.startswith("$GPGGA"):
+        parts = line.split(",")
+        if len(parts) > 9:
+            lat_raw = parts[2]
+            lat_dir = parts[3]
+            lon_raw = parts[4]
+            lon_dir = parts[5]
+            fix = parts[6]
+            alt = parts[9]
+
+            lat = float(lat_raw[:2]) + float(lat_raw[2:])/60 if lat_raw else 0
+            lon = float(lon_raw[:3]) + float(lon_raw[3:])/60 if lon_raw else 0
+            if lat_dir == "S": lat = -lat
+            if lon_dir == "W": lon = -lon
+
+            return {"lat":lat,"lon":lon,"fix":fix,"alt":alt}
+    return None
+
+def parse_gprmc(line):
+    if line.startswith("$GPRMC"):
+        parts = line.split(",")
+        if len(parts) > 9:
+            time_utc = parts[1]   # hhmmss.sss
+            date = parts[9]       # ddmmyy
+            return {"time":time_utc, "date":date}
+    return None
+
+def read_gps():
+    gps_data = {}
+    for _ in range(20):
+        if gsm.any():
+            line = gsm.readline()
+            if line:
+                line = line.decode(errors="ignore").strip()
+                gpgga = parse_gpgga(line)
+                gprmc = parse_gprmc(line)
+                if gpgga: gps_data.update(gpgga)
+                if gprmc: gps_data.update(gprmc)
+                if "lat" in gps_data and "date" in gps_data:
+                    return gps_data
+    return None
+
+##################### WIFI + MQTT ##################################
+
+# --- Wi-Fi connection ---
+def wifi_connect():
+    global IP
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+
+    while True:
+        # Scan for available networks
+        available_ssids = [net[0].decode('utf-8') for net in wlan.scan()]
+        if WIFI_SSID in available_ssids:
+            if not wlan.isconnected():
+                print(f"SSID '{WIFI_SSID}' found. Connecting...")
+                wlan.connect(WIFI_SSID, security=0)
+                retry = 0
+                while not wlan.isconnected():
+                    print(f"Waiting for connection... ({retry})")
+                    time.sleep(2)
+                    retry += 1
+
+                status = wlan.ifconfig()
+                IP = status[0]
+                print("Connected! IP:", IP)
+                if IP != '0.0.0.0':
+                    sync_time()
+            else:
+                # Already connected, just update IP
+                status = wlan.ifconfig()
+                IP = status[0]
+                print("Already connected, just update IP:", IP)
+                break
+        else:
+            print(f"SSID '{WIFI_SSID}' not found. Retrying in 5 seconds...")
+
+        time.sleep(5)  # Delay before checking again
+
+
+# --- MQTT connection ---
+def mqtt_connect():
+    global client
+    while True:
+        try:
+            client = MQTTClient(DEVICE, MQTT_SERVER, port=MQTT_PORT)
+            client.connect()
+            print("MQTT connected")
+            break
+        except Exception as e:
+            print("MQTT connect failed:", e)
+            time.sleep(5)
+
+
+# --- Publish with connectivity check ---
+def publish_mqtt(payload):
+    global client, wlan
+    try:
+        # Ensure Wi-Fi is connected
+        if wlan is None or not wlan.isconnected():
+            print("Wi-Fi lost or uninitialized, reconnecting...")
+            wifi_connect()
+
+        # Ensure MQTT client exists and is connected
+        if client is None:
+            print("MQTT client uninitialized, connecting...")
+            mqtt_connect()
+
+        client.publish(MQTT_TOPIC, payload, qos=1)
+        print("Published:", payload)
+
+    except Exception as e:
+        print("MQTT publish failed:", e)
+        # Attempt to reconnect MQTT if publishing fails
+        mqtt_connect()
+
+
+def sync_time():
+    TIMEZONE = 0
+    try:
+        print("Syncing time with NTP...")
+        ntptime.host = "192.168.10.1"
+        ntptime.settime()  # sets system time (UTC)
+
+        # Read system time
+        t = time.localtime(time.time() + TIMEZONE * 3600)
+
+        # Set RTC from adjusted time
+        rtc = RTC()
+        rtc.datetime((2021, 1, 1, 0, 0, 0, 0, 0))
+        rtc.datetime((
+            t[0], t[1], t[2],    # year, month, day
+            t[6],                # weekday (0=Mon)
+            t[3], t[4], t[5],    # hour, minute, second
+            0                    # subseconds
+        ))
+
+        print("RTC updated:", rtc.datetime())
+
+    except Exception as e:
+        print("NTP sync failed:", e)
+
+######################## MAIN LOOP #################################
+rtc = RTC()
+
+print('power_on_off')
+power_on_off()
+print('wifi_connect')
+wlan = wifi_connect()
+print('mqtt_connect')
+mqtt_connect()
+
+# create RTC object
+print('running main script')
+while True:
+    try:
+        blink()
+        bts = get_bts_info()
+        gps = read_gps()
+        # --------- RTC timestamp ----------
+        dt = rtc.datetime()
+        timestamp = "{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}".format(
+            dt[0], dt[1], dt[2], dt[4], dt[5], dt[6]
+        )
+        datestamp = "{:04d}-{:02d}-{:02d}".format(
+            dt[0], dt[1], dt[2]
+        )
+
+        if datestamp == '2021-01-01':
+            sync_time()
+
+        # -----------------------------------
+        print('Running...'+timestamp)
+
+        if bts:
+            msg = f"btsgps,dev={DEVICE},mcc={bts['MCC']},mnc={bts['MNC']},bsic={bts['BSIC']},cid={bts['CELLID']},lac={bts['LAC']},rtc={timestamp},ip={IP}"
+            if gps:
+                msg += (f",lat={gps['lat']:.6f},lon={gps['lon']:.6f},alt={gps['alt']},fix={gps['fix']},date={gps['date']},time={gps['time']}")
+            publish_mqtt(msg)
+            print('MSG send: '+msg)
+        time.sleep(1)
+
+    except OSError:
+        machine.reset()
+    except MemoryError:
+        machine.reset()
