@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>RPI BTS Data</title>
+<style>
+  table {
+    border-collapse: collapse;
+    width: 50%;
+    background-color: #f0f0f0;
+  }
+  th, td {
+    border: 1px solid #999;
+    padding: 6px 12px;
+    text-align: center;
+  }
+  th {
+    background-color: #ccc;
+  }
+  .m23101 { background-color: orange; }
+  .m23102 { background-color: magenta; color: white; }
+  .m23103 { background-color: lightgreen; }
+  .m23106 { background-color: DodgerBlue; }
+
+  /* Highlight fade class using inline style */
+  .highlight {
+    transition: background-color 1s linear;
+  }
+
+  #current-time {
+    font-weight: bold;
+    margin-bottom: 10px;
+    font-size: 16px;
+  }
+</style>
+</head>
+<body bgcolor="black" align="center">
+
+<table align="center">
+  <thead>
+    <tr>
+      <th>Device</th>
+      <th>Node</th>
+      <th>MCCMNC</th>
+      <th>Cell ID</th>
+      <th>LAC</th>
+      <th id="current-time-header">Time</th>
+      <th>Lat</th>
+      <th>Lon</th>
+      <th>Alt</th>
+      <th>IP</th>
+    </tr>
+  </thead>
+  <tbody id="bts-table">
+    <tr><td colspan="10">Loading...</td></tr>
+  </tbody>
+</table>
+
+<script>
+function updateCurrentTimeInTable() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0'); // Months are 0-based
+    const day = String(now.getDate()).padStart(2, '0');
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const seconds = String(now.getSeconds()).padStart(2, '0');
+
+    const formatted = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+    document.getElementById('current-time-header').textContent = formatted;
+}
+
+// call immediately and every second
+updateCurrentTimeInTable();
+setInterval(updateCurrentTimeInTable, 1000);
+
+
+function getNode(dev) {
+    if (dev === 'e66164084360a42e') return 'node06';
+    if (dev === 'e661640843228b25') return 'node07';
+    if (dev === 'e6616408438f952e') return 'node08';
+    if (dev === 'e661385283997828') return 'node09';
+    return '';
+}
+
+function getClassName(mccmnc) {
+    if (mccmnc === '23101') return 'm23101';
+    if (mccmnc === '23102') return 'm23102';
+    if (mccmnc === '23103') return 'm23103';
+    if (mccmnc === '23106') return 'm23106';
+    return '';
+}
+
+// store previous cid for highlight comparison
+const prevCIDs = {};
+
+async function loadData() {
+    try {
+        const res = await fetch('firmware/data.json');
+        const data = await res.json();
+
+        // sort by node
+        data.sort((a, b) => {
+            const nodeA = getNode(a.dev);
+            const nodeB = getNode(b.dev);
+            return nodeA.localeCompare(nodeB);
+        });
+
+        const tbody = document.getElementById('bts-table');
+        tbody.innerHTML = '';
+
+        data.forEach(item => {
+            const tr = document.createElement('tr');
+            const mccmnc = item.mcc + item.mnc;
+            const node = getNode(item.dev);
+            const className = getClassName(mccmnc);
+
+            // check for cid change
+            const prevCID = prevCIDs[item.dev];
+            if (prevCID && prevCID !== item.cid) {
+                // set highlight intensity
+                item.highlight = 1.0;
+            } else if (item.highlight) {
+                // fade highlight
+                item.highlight *= 0.9; // slower fade
+            } else {
+                item.highlight = 0;
+            }
+
+            // save current cid
+            prevCIDs[item.dev] = item.cid;
+
+            // compute row background based on highlight
+            const highlightColor = item.highlight > 0 ? `rgba(255,0,0,${item.highlight})` : '';
+            tr.style.backgroundColor = highlightColor;
+
+            tr.innerHTML = `
+                <td>${item.dev}</td>
+                <td>${node}</td>
+                <td class="${className}">${mccmnc}</td>
+                <td>${item.cid}</td>
+                <td>${item.lac}</td>
+                <td>${item.rtc}</td>
+                <td>${item.lat}</td>
+                <td>${item.lon}</td>
+                <td>${item.alt}</td>
+                <td>${item.ip}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+    } catch(err) {
+        console.error(err);
+        document.getElementById('bts-table').innerHTML = '<tr><td colspan="10">Error fetching data</td></tr>';
+    }
+}
+
+// refresh every second
+loadData();
+setInterval(loadData, 1000);
+</script>
+
+</body>
+</html>
