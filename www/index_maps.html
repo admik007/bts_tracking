@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>RPI BTS Data & Map</title>
+<link rel="stylesheet" href="leaflet.css" />
+<style>
+  body { background-color: black; color: white; text-align: center; font-family: sans-serif; }
+  
+  /* Table styling */
+  table {
+    border-collapse: collapse;
+    width: 90%;
+    margin: 20px auto;
+    background-color: #f0f0f0;
+    color: black;
+  }
+  th, td {
+    border: 1px solid #999;
+    padding: 6px 12px;
+    text-align: center;
+  }
+  th { background-color: #ccc; }
+
+  .m23101 { background-color: orange; }
+  .m23102 { background-color: magenta; color: white; }
+  .m23103 { background-color: lightgreen; }
+  .m23106 { background-color: DodgerBlue; }
+
+  .highlight { transition: background-color 1s linear; }
+
+  #current-time-header { font-weight: bold; }
+
+  /* Map styling */
+  #map { height: 60vh; width: 90%; margin: 20px auto; }
+</style>
+</head>
+<body>
+
+<h1>RPI BTS Live Data & Map</h1>
+
+<!-- Table -->
+<table>
+  <thead>
+    <tr>
+      <th>Device</th>
+      <th>Node</th>
+      <th>MCCMNC</th>
+      <th>Cell ID</th>
+      <th>LAC</th>
+      <th id="current-time-header">Time</th>
+      <th>Lat</th>
+      <th>Lon</th>
+      <th>Alt</th>
+      <th>IP</th>
+    </tr>
+  </thead>
+  <tbody id="bts-table">
+    <tr><td colspan="10">Loading...</td></tr>
+  </tbody>
+</table>
+
+<!-- Map -->
+<div id="map"></div>
+
+<script src="leaflet.js"></script>
+<script>
+/* ---------- Table and Time ---------- */
+function updateCurrentTimeInTable() {
+    const now = new Date();
+    const formatted = now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+
+                      String(now.getDate()).padStart(2,'0')+' '+
+                      String(now.getHours()).padStart(2,'0')+':'+
+                      String(now.getMinutes()).padStart(2,'0')+':'+
+                      String(now.getSeconds()).padStart(2,'0');
+    document.getElementById('current-time-header').textContent = formatted;
+}
+updateCurrentTimeInTable();
+setInterval(updateCurrentTimeInTable, 1000);
+
+function getNode(dev) {
+    if (dev === 'e66164084360a42e') return 'node06';
+    if (dev === 'e661640843228b25') return 'node07';
+    if (dev === 'e6616408438f952e') return 'node08';
+    if (dev === 'e661385283997828') return 'node09';
+    return '';
+}
+function getClassName(mccmnc) {
+    if (mccmnc === '23101') return 'm23101';
+    if (mccmnc === '23102') return 'm23102';
+    if (mccmnc === '23103') return 'm23103';
+    if (mccmnc === '23106') return 'm23106';
+    return '';
+}
+
+/* ---------- Map ---------- */
+const operatorColors = { "23101":"orange","23102":"magenta","23103":"lightgreen","23106":"DodgerBlue" };
+let map = L.map('map').setView([48.7195, 21.208], 15);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: 'Map data © OpenStreetMap contributors'
+}).addTo(map);
+
+const markers = {};
+const prevCIDs = {};
+const prevTableCIDs = {};
+
+/* ---------- Load & Update Data ---------- */
+async function loadData() {
+    try {
+        const res = await fetch('firmware/data.json');
+        const data = await res.json();
+
+        // ----- Table Update -----
+        data.sort((a,b) => getNode(a.dev).localeCompare(getNode(b.dev)));
+        const tbody = document.getElementById('bts-table');
+        tbody.innerHTML = '';
+
+        data.forEach(item => {
+            const tr = document.createElement('tr');
+            const mccmnc = item.mcc + item.mnc;
+            const node = getNode(item.dev);
+            const className = getClassName(mccmnc);
+
+            // Table CID highlight
+            const prevCID = prevTableCIDs[item.dev];
+            if(prevCID && prevCID !== item.cid) { item.highlight = 1.0; } 
+            else if(item.highlight){ item.highlight *= 0.9; } 
+            else { item.highlight=0; }
+            prevTableCIDs[item.dev] = item.cid;
+            const highlightColor = item.highlight>0 ? `rgba(255,0,0,${item.highlight})` : '';
+            tr.style.backgroundColor = highlightColor;
+
+            tr.innerHTML = `
+                <td>${item.dev}</td>
+                <td>${node}</td>
+                <td class="${className}">${mccmnc}</td>
+                <td>${item.cid}</td>
+                <td>${item.lac}</td>
+                <td>${item.rtc}</td>
+                <td>${item.lat}</td>
+                <td>${item.lon}</td>
+                <td>${item.alt}</td>
+                <td>${item.ip}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+
+        // ----- Map Update -----
+        let lastLat = null, lastLon = null;
+        data.forEach(item => {
+            const dev = item.dev;
+            const lat = parseFloat(item.lat);
+            const lon = parseFloat(item.lon);
+            const mccmnc = item.mcc + item.mnc;
+            const baseColor = operatorColors[mccmnc] || "gray";
+            lastLat = lat; lastLon = lon;
+
+            if(!markers[dev]){
+                const marker = L.circleMarker([lat, lon], { radius:8, color:baseColor, fillOpacity:0.8 })
+                    .addTo(map)
+                    .bindPopup(`<b>${dev}</b><br>MCCMNC: ${mccmnc}<br>CID: ${item.cid}<br>LAC: ${item.lac}<br>IP: ${item.ip}<br>Alt: ${item.alt}<br>GPS Time: ${item.gps_time}`);
+                markers[dev] = marker;
+            } else {
+                markers[dev].setLatLng([lat,lon]);
+                markers[dev].getPopup().setContent(`<b>${dev}</b><br>MCCMNC: ${mccmnc}<br>CID: ${item.cid}<br>LAC: ${item.lac}<br>IP: ${item.ip}<br>Alt: ${item.alt}<br>GPS Time: ${item.gps_time}`);
+            }
+
+            // Map CID highlight
+            const prevCID = prevCIDs[dev];
+            if(prevCID && prevCID !== item.cid){ markers[dev].setStyle({color:'red', fillOpacity:1.0}); markers[dev].highlight=1.0; }
+            else if(markers[dev].highlight){ markers[dev].highlight*=0.9; markers[dev].setStyle({color:'red', fillOpacity:markers[dev].highlight}); }
+            else{ markers[dev].setStyle({color:baseColor, fillOpacity:0.8}); }
+            prevCIDs[dev] = item.cid;
+        });
+
+        if(lastLat!==null && lastLon!==null){ map.setView([lastLat,lastLon]); }
+
+    } catch(err){
+        console.error(err);
+        document.getElementById('bts-table').innerHTML = '<tr><td colspan="10">Error fetching data</td></tr>';
+    }
+}
+
+// Initial load and refresh
+loadData();
+setInterval(loadData, 1000);
+
+</script>
+</body>
+</html>
