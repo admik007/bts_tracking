@@ -1,0 +1,15 @@
+#/etc/systemd/system/mqtt-gps-time.service
+[Unit]
+Description=Set system time from GPS via MQTT
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/var/www/html/firmware/mqtt-gps-time.sh
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
