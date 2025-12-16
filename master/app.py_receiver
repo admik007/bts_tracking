@@ -1,0 +1,713 @@
+import utime, time, ubinascii, machine, network, ntptime, framebuf, sdcard, uos, os, gc
+from machine import RTC, WDT, Pin, SPI, PWM, UART
+from simple import MQTTClient
+from micropyGPS import MicropyGPS
+print ("Running external script")
+
+SD = True
+HOST = 'http://gps.ztk-comp.sk/'
+DEBUG = True
+
+
+# Initialize LCD
+DC = 8          #SPI-1
+CS = 9          #SPI-1
+BL = 13         #SPI-1
+SCK = 10        #SPI-1
+MOSI = 11       #SPI-1
+RST = 12        #SPI-1
+
+key3 = Pin(3 ,Pin.IN,Pin.PULL_UP)
+key2 = Pin(2 ,Pin.IN,Pin.PULL_UP)
+key1 = Pin(17,Pin.IN,Pin.PULL_UP)
+key0 = Pin(15,Pin.IN,Pin.PULL_UP)
+
+class LCD_1inch44(framebuf.FrameBuffer):
+    def __init__(self):
+        self.width = 128
+        self.height = 128
+
+        self.cs = Pin(CS,Pin.OUT)
+        self.rst = Pin(RST,Pin.OUT)
+
+        self.cs(1)
+        self.spi = SPI(1)
+        self.spi = SPI(1,1000_000)
+        self.spi = SPI(1,10000_000,polarity=0, phase=0,sck=Pin(SCK),mosi=Pin(MOSI),miso=None)
+        self.dc = Pin(DC,Pin.OUT)
+        self.dc(1)
+        self.buffer = bytearray(self.height * self.width * 2)
+        super().__init__(self.buffer, self.width, self.height, framebuf.RGB565)
+        self.init_display()
+
+
+        self.WHITE   = 0xFFFF
+        self.BLACK   = 0x0000
+        self.GREEN   = 0x001F
+        self.RED     = 0xF800
+        self.BLUE    = 0x07E0
+        self.GBLUE   = 0X07FF
+        self.YELLOW  = 0xFFE0
+
+        self.ORANGE  = 0xFFA500
+        self.MAGENTA = 0xFF00FF
+        self.LGREEN  = 0x90EE90
+        self.LBLUE   = 0xADD8E6
+
+
+    def write_cmd(self, cmd):
+        self.cs(1)
+        self.dc(0)
+        self.cs(0)
+        self.spi.write(bytearray([cmd]))
+        self.cs(1)
+
+    def write_data(self, buf):
+        self.cs(1)
+        self.dc(1)
+        self.cs(0)
+        self.spi.write(bytearray([buf]))
+        self.cs(1)
+
+    def init_display(self):
+        """Initialize dispaly"""
+        self.rst(1)
+        self.rst(0)
+        self.rst(1)
+
+        self.write_cmd(0x36);
+        self.write_data(0x70);
+
+        self.write_cmd(0x3A);
+        self.write_data(0x05);
+
+         #ST7735R Frame Rate
+        self.write_cmd(0xB1);
+        self.write_data(0x01);
+        self.write_data(0x2C);
+        self.write_data(0x2D);
+
+        self.write_cmd(0xB2);
+        self.write_data(0x01);
+        self.write_data(0x2C);
+        self.write_data(0x2D);
+
+        self.write_cmd(0xB3);
+        self.write_data(0x01);
+        self.write_data(0x2C);
+        self.write_data(0x2D);
+        self.write_data(0x01);
+        self.write_data(0x2C);
+        self.write_data(0x2D);
+
+        self.write_cmd(0xB4); #Column inversion
+        self.write_data(0x07);
+
+        #ST7735R Power Sequence
+        self.write_cmd(0xC0);
+        self.write_data(0xA2);
+        self.write_data(0x02);
+        self.write_data(0x84);
+        self.write_cmd(0xC1);
+        self.write_data(0xC5);
+
+        self.write_cmd(0xC2);
+        self.write_data(0x0A);
+        self.write_data(0x00);
+
+        self.write_cmd(0xC3);
+        self.write_data(0x8A);
+        self.write_data(0x2A);
+        self.write_cmd(0xC4);
+        self.write_data(0x8A);
+        self.write_data(0xEE);
+
+        self.write_cmd(0xC5); #VCOM
+        self.write_data(0x0E);
+
+        #ST7735R Gamma Sequence
+        self.write_cmd(0xe0);
+        self.write_data(0x0f);
+        self.write_data(0x1a);
+        self.write_data(0x0f);
+        self.write_data(0x18);
+        self.write_data(0x2f);
+        self.write_data(0x28);
+        self.write_data(0x20);
+        self.write_data(0x22);
+        self.write_data(0x1f);
+        self.write_data(0x1b);
+        self.write_data(0x23);
+        self.write_data(0x37);
+        self.write_data(0x00);
+        self.write_data(0x07);
+        self.write_data(0x02);
+        self.write_data(0x10);
+
+        self.write_cmd(0xe1);
+        self.write_data(0x0f);
+        self.write_data(0x1b);
+        self.write_data(0x0f);
+        self.write_data(0x17);
+        self.write_data(0x33);
+        self.write_data(0x2c);
+        self.write_data(0x29);
+        self.write_data(0x2e);
+        self.write_data(0x30);
+        self.write_data(0x30);
+        self.write_data(0x39);
+        self.write_data(0x3f);
+        self.write_data(0x00);
+        self.write_data(0x07);
+        self.write_data(0x03);
+        self.write_data(0x10);
+
+        self.write_cmd(0xF0); #Enable test command
+        self.write_data(0x01);
+
+        self.write_cmd(0xF6); #Disable ram power save mode
+        self.write_data(0x00);
+            #sleep out
+        self.write_cmd(0x11);
+        #Turn on the LCD display
+        self.write_cmd(0x29);
+
+    def show(self):
+        self.write_cmd(0x2A)
+        self.write_data(0x00)
+        self.write_data(0x01)
+        self.write_data(0x00)
+        self.write_data(0x80)
+
+        self.write_cmd(0x2B)
+        self.write_data(0x00)
+        self.write_data(0x02)
+        self.write_data(0x00)
+        self.write_data(0x82)
+
+        self.write_cmd(0x2C)
+
+        self.cs(1)
+        self.dc(1)
+        self.cs(0)
+        self.spi.write(self.buffer)
+        self.cs(1)
+
+if __name__=='__main__':
+    pwm = PWM(Pin(BL))
+    pwm.freq(1000)
+    pwm.duty_u16(32768)#max 65535
+
+    LCD = LCD_1inch44()
+    #color BRG
+    LCD.fill(LCD.BLACK)
+
+    LCD.show()
+
+
+led = machine.Pin("LED", machine.Pin.OUT)
+def blink():
+ led.value(1)
+ time.sleep(.1)
+ led.value(0)
+ time.sleep(.9)
+
+# ----------------- Wi-Fi / MQTT settings -----------------
+# CONFIG
+WIFI_SSID = "rpi_network"
+MQTT_SERVER = "192.168.10.1"
+MQTT_TOPIC = b"pico/data"
+MQTT_TOPIC_pub = b"pico/gps"
+MQTT_PORT = 1883
+DEVICE = ubinascii.hexlify(machine.unique_id()).decode()
+led = machine.Pin("LED", machine.Pin.OUT)
+
+# Storage for BTS info per device
+bts_data = {}
+
+# Optional color coding for MCC+MNC
+color_map = {
+    "23101": "\033[33m",  # Orange
+    "23102": "\033[35m",  # Magenta
+    "23103": "\033[92m",  # Light Green
+    "23106": "\033[94m",  # Light Blue
+}
+COLOR_RESET = "\033[0m"
+
+# --- Wi-Fi connection ---
+def wifi_connect():
+    global IP
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+
+    while True:
+        # Scan for available networks
+        available_ssids = [net[0].decode('utf-8') for net in wlan.scan()]
+        if WIFI_SSID in available_ssids:
+            if not wlan.isconnected():
+                print(f"SSID '{WIFI_SSID}' found. Connecting...")
+                wlan.connect(WIFI_SSID, security=0)
+                retry = 0
+                while not wlan.isconnected():
+                    print(f"Waiting for connection... ({retry})")
+                    time.sleep(2)
+                    retry += 1
+                    dt = rtc.datetime()
+                    dat = "{:04d}-{:02d}-{:02d}".format(dt[0], dt[1], dt[2])
+                    tim = "{:02d}:{:02d}:{:02d}".format(dt[4], dt[5], dt[6])
+                    LCD.text("Waiting for wifi", 2, 10, LCD.RED)
+                    LCD.text("Date: "+dat, 2, 25, LCD.GREEN)
+                    LCD.text("Time: "+tim, 2, 40, LCD.GREEN)
+                    LCD.show()
+                    LCD.fill(LCD.BLACK)
+                    utime.sleep(1)
+
+                status = wlan.ifconfig()
+                IP = status[0]
+                print("Connected! IP:", IP)
+                if IP != '0.0.0.0':
+                    sync_time()
+            else:
+                # Already connected, just update IP
+                status = wlan.ifconfig()
+                IP = status[0]
+                print("Already connected, just update IP:", IP)
+                break
+        else:
+            print(f"SSID '{WIFI_SSID}' not found. Retrying in 5 seconds...")
+
+        time.sleep(5)  # Delay before checking again
+
+
+# --- MQTT connection ---
+def mqtt_connect():
+    global client
+    while True:
+        try:
+            client = MQTTClient(DEVICE, MQTT_SERVER, port=MQTT_PORT)
+            client.connect()
+            client.set_callback(sub_callback)     # set callback for incoming messages
+            print("MQTT connected")
+            client.subscribe(MQTT_TOPIC)          # subscribe to topic
+            print("Subscribed to topic:", MQTT_TOPIC)
+            return client
+            break
+        except Exception as e:
+            print("MQTT connect failed:", e)
+            time.sleep(5)
+
+# --- Publish with connectivity check ---
+def publish_mqtt(payload):
+    global client, wlan
+    try:
+        # Ensure Wi-Fi is connected
+        if wlan is None or not wlan.isconnected():
+            print("Wi-Fi lost or uninitialized, reconnecting...")
+            wifi_connect()
+
+        # Ensure MQTT client exists and is connected
+        if client is None:
+            print("MQTT client uninitialized, connecting...")
+            mqtt_connect()
+
+        client.publish(MQTT_TOPIC, payload, qos=1)
+        print("Published:", payload)
+
+    except Exception as e:
+        print("MQTT publish failed:", e)
+        # Attempt to reconnect MQTT if publishing fails
+        mqtt_connect()
+
+# ----------------- RTC setup -----------------
+def sync_time():
+    TIMEZONE = 0
+    try:
+        print("Syncing time with NTP...")
+#        ntptime.host = "pool.ntp.org"
+        ntptime.host = "192.168.10.1"
+        ntptime.settime()  # sets system time (UTC)
+
+        # Read system time
+        t = time.localtime(time.time() + TIMEZONE * 3600)
+
+        # Set RTC from adjusted time
+        rtc = RTC()
+        rtc.datetime((2021, 1, 1, 0, 0, 0, 0, 0))
+        rtc.datetime((
+            t[0], t[1], t[2],    # year, month, day
+            t[6],                # weekday (0=Mon)
+            t[3], t[4], t[5],    # hour, minute, second
+            0                    # subseconds
+        ))
+
+        print("RTC updated:", rtc.datetime())
+
+    except Exception as e:
+        print("NTP sync failed:", e)
+
+GPStime_past = ""
+
+# ----------------- SD card logger -----------------
+if (SD == True):
+ # SPI configuration for SPI0
+ spi = machine.SPI(0,baudrate=100_000, polarity=0, phase=0, sck=machine.Pin(18), mosi=machine.Pin(19), miso=machine.Pin(16))
+ cs = machine.Pin(17, machine.Pin.OUT)
+ cs.value(1)  # deselect SD card initially
+ PATHA="/sd"
+ # INITIALIZE SD CARD
+ sd = sdcard.SDCard(spi, cs)
+ # MOUNT THE FILESYSTEM
+ vfs = uos.VfsFat(sd)
+ uos.mount(vfs, PATHA)
+else:
+ PATHA=""
+
+
+def write_to_file():
+ if (date_full != "2000-00-00"):
+  if (DEBUG == True):
+   print('Start writing to file')
+  file=open(PATHA+"/gps_"+date_full+"-"+HOUR+".gpx","a")
+  file.write("\n"+URL)
+  file.flush()
+  LCD.fill_rect(100,10,16,9,LCD.GREEN)
+  LCD.rect(100,10,16,9,LCD.GREEN)
+  LCD.text("WR",100,11,LCD.BLUE)
+  if (DEBUG == True):
+   print("Write completted.")
+ else:
+  LCD.fill_rect(100,10,16,9,LCD.RED)
+  LCD.rect(100,10,16,9,LCD.RED)
+  LCD.text("NO",100,11,LCD.BLUE)
+
+
+# ----------------- GPS module -----------------
+gps_module = UART(0, baudrate=9600, tx=Pin(0), rx=Pin(1))
+time_zone = 0
+gps = MicropyGPS(time_zone)
+
+latitude = ""
+longitude = ""
+altitude = ""
+altitude_past = 0
+AL=''
+satellites  = ""
+GPStime = ""
+TIMEOUT = 800
+WAITTIME = 0.1
+NEWS = "N "
+
+
+# CONVERT COORDINATES
+def convert_coordinates(sections):
+ if sections[0] == 0:  # sections[0] contains the degrees
+  return None
+
+ # sections[1] contains the minutes
+ data = sections[0] + (sections[1] / 60.0)
+
+ # sections[2] contains 'E', 'W', 'N', 'S'
+ if sections[2] == 'S':
+  data = -data
+ if sections[2] == 'W':
+  data = -data
+
+ data = '{0:.5f}'.format(data)  # 6 decimal places
+ return str(data)
+
+# ----------------- MQTT callback -----------------
+last_cid = {}
+def sub_callback(topic, msg):
+    global URL
+    payload = msg.decode()
+    try:
+        parts = payload.split(",")
+        data = {}
+        for p in parts:
+            if "=" in p:
+                k, v = p.split("=")
+                data[k.strip().lower()] = v.strip()
+
+        dev = data.get("dev")
+        if dev:
+            bts_data[dev] = {
+                "mcc": str(data.get("mcc", "")),
+                "mnc": str(data.get("mnc", "")),
+                "cid": str(data.get("cid", "")),
+                "lac": str(data.get("lac", ""))
+            }
+
+            # Get current RTC time
+            dt = rtc.datetime()
+            timestamp = "{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}".format(dt[0], dt[1], dt[2], dt[4], dt[5], dt[6])
+            date = "{:04d}-{:02d}-{:02d}".format(dt[0], dt[1], dt[2])
+            time = "{:02d}:{:02d}:{:02d}".format(dt[4], dt[5], dt[6])
+
+            # --- Update LCD with timestamp ---
+            LCD.hline(0,0,128,LCD.GBLUE)                # Top line
+            LCD.hline(0,127,128,LCD.GBLUE)      # Bottom line
+            LCD.vline(0,0,128,LCD.GBLUE)                # Left line
+            LCD.vline(127,0,128,LCD.GBLUE)      # Right line
+
+            LCD.hline(1,21,126,LCD.WHITE)       # DATE/BTS
+            LCD.hline(1,22,126,LCD.WHITE)       # DATE/BTS
+
+            LCD.hline(1,63,126,LCD.WHITE)       # BTS/GPS
+            LCD.hline(1,64,126,LCD.WHITE)       # BTS/GPS
+
+            LCD.text(date,2,3,LCD.GREEN)
+            LCD.text(time,2,13,LCD.GREEN)
+
+            # --- Draw BTS info ---
+            y_offset = 25  # start below the timestamp
+            for d, info in bts_data.items():
+                dv = "xx"
+                if info["mcc"] + info["mnc"] == "23101":
+                    dv = "OR"
+                elif info["mcc"] + info["mnc"] == "23102":
+                    dv = "TM"
+                elif info["mcc"] + info["mnc"] == "23106":
+                    dv = "O2"
+                elif info["mcc"] + info["mnc"] == "23103":
+                    dv = "4K"
+
+                if y_offset > 110:  # avoid drawing outside screen
+                    break
+                key = info["mcc"] + info["mnc"]
+                # Optional: simple color coding on LCD (RGB565)
+                color = LCD.WHITE
+                if key == "23101":
+                    color = LCD.WHITE
+                elif key == "23102":
+                    color = LCD.WHITE
+                elif key == "23103":
+                    color = LCD.WHITE
+                elif key == "23106":
+                    color = LCD.WHITE
+                text = dv+": {}{} {}".format(info["mcc"], info["mnc"], info["cid"])
+                LCD.text(text, 2, y_offset, color)
+                y_offset += 10  # line spacing
+
+            # Print all devices with timestamp
+            print("\n--- Current BTS Info --- [{}]".format(timestamp))
+            blink()
+            for d, info in bts_data.items():
+                key = info["mcc"] + info["mnc"]
+                color = color_map.get(key, "")
+#                print(f"{color}{d}: MCCMNC={info['mcc']}{info['mnc']} CID={info['cid']} LAC={info['lac']}{COLOR_RESET}")
+                URL=(HOST+"?lat="+latitude+info['mnc']+"&lon="+longitude+info['mnc']+"&sat="+satellites+"&alt="+altitude+"&time="+str(GPStime)+"&speed="+str(speed.split(' ')[0])+"&dir="+str(course)+"&devicerpi="+d+"&MCC="+info['mcc']+"&MNC="+info['mnc']+"&CELLID="+info['cid']+"&LAC="+info['lac'])
+                print(URL)
+                cid = info['cid']
+                if last_cid.get(d) != cid:
+                 write_to_file()
+                 last_cid[d] = cid
+
+            LCD.show()
+            LCD.fill(LCD.BLACK)
+
+    except Exception as e:
+        print("Error parsing MQTT message:", e)
+
+
+# ----------------- Main loop -----------------
+rtc = RTC()
+
+
+print('wifi_connect')
+wlan = wifi_connect()
+
+print('mqtt_connect')
+client = mqtt_connect()
+
+TIME_SYNC = False
+
+X = 0
+Y = 128
+STEP = 129
+COLOR = 4
+COLOR_A = LCD.RED
+COLOR_B = LCD.GREEN
+COLOR_C = LCD.BLUE
+COLOR_D = LCD.YELLOW
+
+while True:
+ try:
+  blink()
+  client.check_msg()
+  time.sleep(0.1)
+
+  length = gps_module.any()
+
+  if length > 0:
+   data = gps_module.read(length)
+   for byte in data:
+    message = gps.update(chr(byte))
+
+  latitude = convert_coordinates(gps.latitude)
+  if latitude is not None:
+   latitude = convert_coordinates(gps.latitude)
+  else:
+   latitude = '0.000000'
+
+  longitude = convert_coordinates(gps.longitude)
+  if longitude is not None:
+   longitude = convert_coordinates(gps.longitude)
+  else:
+   longitude = '0.000000'
+
+  fixstat = gps.fix_stat
+
+  altitude_full = str(gps.altitude)
+  altitudepart = altitude_full.split('.')
+  altitude = altitudepart[0]
+
+  if (str(altitude) > str(altitude_past)):
+   altitude_past = str(altitude)
+   AL='+'
+  if (str(altitude) < str(altitude_past)):
+   altitude_past = str(altitude)
+   AL='-'
+
+  satellites_view = str(gps.satellites_in_view)
+  satellites_used = str(gps.satellites_used)
+  satellites = str(gps.satellites_in_use)
+
+  course_full = str(gps.course)
+  coursepart = course_full.split('.')
+  course = coursepart[0]
+
+  if (gps.course > 0 and gps.course < 22.5): NEWS = 'N '
+  if (gps.course > 22.5 and gps.course < 67.5): NEWS = 'NE'
+  if (gps.course > 67.5 and gps.course < 112.5): NEWS = 'E '
+  if (gps.course > 112.5 and gps.course < 157.5): NEWS = 'SE'
+  if (gps.course > 157.5 and gps.course < 202.5): NEWS = 'S '
+  if (gps.course > 202.5 and gps.course < 247.5): NEWS = 'SW'
+  if (gps.course > 247.5 and gps.course < 292.5): NEWS = 'W '
+  if (gps.course > 292.5 and gps.course < 337.5): NEWS = 'NW'
+  if (gps.course > 337.5 and gps.course < 0): NEWS = 'N '
+
+  speed = str(gps.speed_string(unit='kph'))
+  speeda = speed.split(', ')
+  speed = (speeda[0].split('.')[0])
+
+  date_full = str(gps.datestamp)
+  datefullpart = date_full.split(', ')
+
+  DAYpart=datefullpart[0].split('[')
+  DAY = str(DAYpart[1])
+  if (DAY == '0'): DAY = str("0"+DAY)
+  if (DAY == '1'): DAY = str("0"+DAY)
+  if (DAY == '2'): DAY = str("0"+DAY)
+  if (DAY == '3'): DAY = str("0"+DAY)
+  if (DAY == '4'): DAY = str("0"+DAY)
+  if (DAY == '5'): DAY = str("0"+DAY)
+  if (DAY == '6'): DAY = str("0"+DAY)
+  if (DAY == '7'): DAY = str("0"+DAY)
+  if (DAY == '8'): DAY = str("0"+DAY)
+  if (DAY == '9'): DAY = str("0"+DAY)
+
+  MONTHpart=datefullpart[1]
+  MONTH = str(MONTHpart)
+  if (MONTHpart == '0'): MONTH = str("0"+MONTHpart)
+  if (MONTHpart == '1'): MONTH = str("0"+MONTHpart)
+  if (MONTHpart == '2'): MONTH = str("0"+MONTHpart)
+  if (MONTHpart == '3'): MONTH = str("0"+MONTHpart)
+  if (MONTHpart == '4'): MONTH = str("0"+MONTHpart)
+  if (MONTHpart == '5'): MONTH = str("0"+MONTHpart)
+  if (MONTHpart == '6'): MONTH = str("0"+MONTHpart)
+  if (MONTHpart == '7'): MONTH = str("0"+MONTHpart)
+  if (MONTHpart == '8'): MONTH = str("0"+MONTHpart)
+  if (MONTHpart == '9'): MONTH = str("0"+MONTHpart)
+
+  YEARpart=datefullpart[2].split(']')
+  YEAR = '20'+str(YEARpart[0])
+  if (YEAR == '200'): YEAR = '2000'
+  if (YEAR == '2080'): YEAR = '2000'
+  date_full = YEAR+'-'+MONTH+'-'+DAY
+
+  datetime_full = str(gps.timestamp)
+  datetimepart = datetime_full.split(', ')
+  HOURpart=datetimepart[0].split('[')
+  HOUR = str(HOURpart[1])
+  if (HOURpart[1] == '0'): HOUR = str("0"+HOURpart[1])
+  if (HOURpart[1] == '1'): HOUR = str("0"+HOURpart[1])
+  if (HOURpart[1] == '2'): HOUR = str("0"+HOURpart[1])
+  if (HOURpart[1] == '3'): HOUR = str("0"+HOURpart[1])
+  if (HOURpart[1] == '4'): HOUR = str("0"+HOURpart[1])
+  if (HOURpart[1] == '5'): HOUR = str("0"+HOURpart[1])
+  if (HOURpart[1] == '6'): HOUR = str("0"+HOURpart[1])
+  if (HOURpart[1] == '7'): HOUR = str("0"+HOURpart[1])
+  if (HOURpart[1] == '8'): HOUR = str("0"+HOURpart[1])
+  if (HOURpart[1] == '9'): HOUR = str("0"+HOURpart[1])
+
+  MINUTEpart=datetimepart[1]
+  MINUTE = str(MINUTEpart)
+  if (MINUTEpart == '0'): MINUTE = str("0"+MINUTEpart)
+  if (MINUTEpart == '1'): MINUTE = str("0"+MINUTEpart)
+  if (MINUTEpart == '2'): MINUTE = str("0"+MINUTEpart)
+  if (MINUTEpart == '3'): MINUTE = str("0"+MINUTEpart)
+  if (MINUTEpart == '4'): MINUTE = str("0"+MINUTEpart)
+  if (MINUTEpart == '5'): MINUTE = str("0"+MINUTEpart)
+  if (MINUTEpart == '6'): MINUTE = str("0"+MINUTEpart)
+  if (MINUTEpart == '7'): MINUTE = str("0"+MINUTEpart)
+  if (MINUTEpart == '8'): MINUTE = str("0"+MINUTEpart)
+  if (MINUTEpart == '9'): MINUTE = str("0"+MINUTEpart)
+
+  SECONDpart=datetimepart[2].split(']')
+  SECONDpart2=SECONDpart[0].split('.')
+  SECONDpart=SECONDpart2[0]
+  SECOND = str(SECONDpart)
+  if (SECONDpart == '0'): SECOND = str("0"+SECONDpart)
+  if (SECONDpart == '1'): SECOND = str("0"+SECONDpart)
+  if (SECONDpart == '2'): SECOND = str("0"+SECONDpart)
+  if (SECONDpart == '3'): SECOND = str("0"+SECONDpart)
+  if (SECONDpart == '4'): SECOND = str("0"+SECONDpart)
+  if (SECONDpart == '5'): SECOND = str("0"+SECONDpart)
+  if (SECONDpart == '6'): SECOND = str("0"+SECONDpart)
+  if (SECONDpart == '7'): SECOND = str("0"+SECONDpart)
+  if (SECONDpart == '8'): SECOND = str("0"+SECONDpart)
+  if (SECONDpart == '9'): SECOND = str("0"+SECONDpart)
+  datetime = HOUR+':'+MINUTE+':'+SECOND
+  GPStime=date_full+'T'+datetime+'Z'
+
+  if(str(fixstat) == '0'):
+   latitude = '0.000000'
+   longitude = '0.000000'
+   altitude = '0'
+   LCD.fill_rect(80,10,16,9,LCD.RED)
+   LCD.rect(80,10,16,9,LCD.RED)
+   LCD.text("NO",80,11,LCD.BLUE)
+  else:
+   LCD.fill_rect(80,10,16,9,LCD.GREEN)
+   LCD.rect(80,10,16,9,LCD.GREEN)
+   LCD.text("OK",80,11,LCD.BLUE)
+   if (TIME_SYNC == False):
+    rtc.datetime((int(YEAR), int(MONTH), int(DAY), 0, int(HOUR), int(MINUTE), int(SECOND), 0))
+    print("Time synced")
+    TIME_SYNC = True
+
+  if (GPStime != GPStime_past):
+   GPStime_past = GPStime
+   payload = f"lat={latitude}&lon={longitude}&alt={altitude}&time={GPStime}"
+   client.publish(MQTT_TOPIC_pub, payload, qos=0)
+   print("GPS Published")
+
+  LCD.text("Lat: "+latitude,2,65,LCD.WHITE)
+  LCD.text("Lon: "+longitude,2,75,LCD.WHITE)
+  LCD.text("Alt: "+altitude+" mnm",2,85,LCD.WHITE)
+  LCD.text("Sat: T"+satellites_view+" / U"+satellites,2,95,LCD.WHITE)
+  LCD.text("Spd: "+str(speed.split('.')[0])+" km/h",2,105,LCD.WHITE)
+  LCD.text("Dir: "+NEWS+' '+str(course)+"\u00B0",2,115,LCD.WHITE)
+
+  #Free memory
+  gc.collect()
+  time.sleep(0.8)
+
+ except OSError as e:
+  print("Connection closed - resetting")
+  import machine
+  machine.reset()
+
+ except Exception as e:
+  print("Error in main loop:", e)
+  gc.collect()
