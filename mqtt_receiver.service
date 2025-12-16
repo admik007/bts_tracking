@@ -1,0 +1,15 @@
+#/etc/systemd/system/mqtt_receiver.service
+[Unit]
+Description=MQTT Receiver Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /var/www/html/firmware/mqtt_to_json_gps_bts.py
+WorkingDirectory=/var/www/html/firmware
+StandardOutput=inherit
+StandardError=inherit
+Restart=always
+#User=pi
+
+[Install]
+WantedBy=multi-user.target
