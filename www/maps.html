@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>RPI BTS Map</title>
+<link rel="stylesheet" href="leaflet.css" />
+<style>
+  #map { height: 90vh; width: 100%; }
+</style>
+</head>
+<body>
+
+<h2>RPI BTS Live Map</h2>
+<div id="map"></div>
+
+<script src="leaflet.js"></script>
+<script>
+// operator color map
+const operatorColors = {
+    "23101": "orange",
+    "23102": "magenta",
+    "23103": "lightgreen",
+    "23106": "DodgerBlue"
+};
+
+let map = L.map('map').setView([48.7195, 21.208], 15);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: 'Map data © OpenStreetMap contributors'
+}).addTo(map);
+
+const markers = {};
+const prevCIDs = {};
+
+async function loadData() {
+    try {
+        const res = await fetch('firmware/data.json');
+        const data = await res.json();
+
+        let lastLat = null;
+        let lastLon = null;
+
+        data.forEach(item => {
+            const dev = item.dev;
+            const lat = parseFloat(item.lat);
+            const lon = parseFloat(item.lon);
+            const mccmnc = item.mcc + item.mnc;
+            const baseColor = operatorColors[mccmnc] || "gray";
+
+            lastLat = lat;  // store last device coordinates
+            lastLon = lon;
+
+            if (!markers[dev]) {
+                const marker = L.circleMarker([lat, lon], {
+                    radius: 8,
+                    color: baseColor,
+                    fillOpacity: 0.8
+                }).addTo(map);
+
+                marker.bindPopup(`
+                    <b>${dev}</b><br>
+                    MCCMNC: ${mccmnc}<br>
+                    CID: ${item.cid}<br>
+                    LAC: ${item.lac}<br>
+                    IP: ${item.ip}<br>
+                    Alt: ${item.alt}<br>
+                    GPS Time: ${item.gps_time}
+                `);
+                markers[dev] = marker;
+            } else {
+                markers[dev].setLatLng([lat, lon]);
+                markers[dev].getPopup().setContent(`
+                    <b>${dev}</b><br>
+                    MCCMNC: ${mccmnc}<br>
+                    CID: ${item.cid}<br>
+                    LAC: ${item.lac}<br>
+                    IP: ${item.ip}<br>
+                    Alt: ${item.alt}<br>
+                    GPS Time: ${item.gps_time}
+                `);
+            }
+
+            // CID highlight logic
+            const prevCID = prevCIDs[dev];
+            if (prevCID && prevCID !== item.cid) {
+                markers[dev].setStyle({color:'red', fillOpacity:1.0});
+                markers[dev].highlight = 1.0;
+            } else if (markers[dev].highlight) {
+                markers[dev].highlight *= 0.9;
+                markers[dev].setStyle({
+                    color: 'red',
+                    fillOpacity: markers[dev].highlight
+                });
+            } else {
+                markers[dev].setStyle({color: baseColor, fillOpacity: 0.8});
+            }
+
+            prevCIDs[dev] = item.cid;
+        });
+
+        // center map to last device position
+        if (lastLat !== null && lastLon !== null) {
+            map.setView([lastLat, lastLon]);
+        }
+
+    } catch(e) {
+        console.error(e);
+    }
+}
+
+// initial load
+loadData();
+setInterval(loadData, 1000);
+
+</script>
+
+</body>
+</html>
